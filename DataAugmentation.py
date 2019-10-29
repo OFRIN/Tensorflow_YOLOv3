@@ -7,16 +7,20 @@ import random
 import numpy as np
 
 # DataAugmentation (threshold = 0 ~ 1, 0 ~ 100%)
-FLIP_HORIZONTAL = 0.5
-FLIP_VERTICAL = 0.2
+
+# use
+SATURATION = 0.25
+GAUSSIAN_NOISE = 0.1
 SCALE = 0.1
+CROP = 0.25
+FLIP_HORIZONTAL = 0.2
+
+# not use
+FLIP_VERTICAL = 0.2
 BRIGHTNESS = 0.25
 HUE = 0.50
-SATURATION = 0.25
 GRAY = 0.1
-GAUSSIAN_NOISE = 0.1
 SHIFT = 0.25
-CROP = 0.25
 
 def random_horizontal_flip(image, gt_bboxes = None, threshold = FLIP_HORIZONTAL):
     if random.random() <= threshold:
@@ -199,16 +203,16 @@ We use horizontal image flipping as the only form of data augmentation unless ot
 '''
 def DataAugmentation(image, gt_bboxes, gt_classes):
     # image = random_hue(image)
-    # image = random_saturation(image)
+    image = random_saturation(image)
     # image = random_gray(image)
     # image = random_brightness(image)
-    # image = random_gaussian_noise(image)
+    image = random_gaussian_noise(image)
     
-    # image, gt_bboxes = random_scale(image, gt_bboxes)
+    image, gt_bboxes = random_scale(image, gt_bboxes)
     # image, gt_bboxes = random_shift(image, gt_bboxes)
     # image, gt_bboxes = random_vertical_flip(image, gt_bboxes)
     image, gt_bboxes = random_horizontal_flip(image, gt_bboxes)
     
-    # image, gt_bboxes, gt_classes = random_crop(image, gt_bboxes, gt_classes)
+    image, gt_bboxes, gt_classes = random_crop(image, gt_bboxes, gt_classes)
     
     return image.astype(np.uint8), gt_bboxes, gt_classes

@@ -61,7 +61,7 @@ def Decode_Layer(pred_tensors, anchor, stride, name):
 
         x = tf.range(output_size, dtype = tf.int32)
         y = tf.range(output_size, dtype = tf.int32)
-        x, y = tf.meshgrid(x, y)
+        y, x = tf.meshgrid(x, y)
 
         offset_xy = tf.transpose(tf.stack([x, y]), (2, 1, 0))
         offset_xy = tf.reshape(offset_xy, (1, output_size, output_size, 1, 2))
@@ -79,7 +79,7 @@ def Decode_Layer(pred_tensors, anchor, stride, name):
         pred_lt = pred_cxcy - pred_wh / 2
         pred_rb = pred_cxcy + pred_wh / 2
         pred_conf = tf.expand_dims(tf.nn.sigmoid(conf), axis = -1)
-        pred_class = tf.nn.sigmoid(class_prob)
+        pred_class = class_prob # tf.nn.sigmoid(class_prob)
 
         pred_tensors = tf.concat([pred_lt, pred_rb, pred_conf, pred_class], axis = -1)
         pred_tensors = tf.reshape(pred_tensors, (-1, output_size * output_size * 3, 5 + CLASSES), name = 'outputs')

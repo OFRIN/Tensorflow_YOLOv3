@@ -35,10 +35,10 @@ WEIGHT_DECAY = 0.0001
 
 # train
 # use thread (Dataset)
-NUM_THREADS = 8
+NUM_THREADS = 10
 
 # single gpu training
-GPU_INFO = "0"
+GPU_INFO = "0,1,2,3"
 NUM_GPU = len(GPU_INFO.split(','))
 
 BATCH_SIZE = 4 * NUM_GPU
@@ -52,7 +52,7 @@ SAMPLES = BATCH_SIZE
 
 LOG_ITERATION = 50
 SAMPLE_ITERATION = 5000
-SAVE_ITERATION = 5000
+SAVE_ITERATION = 10000
 
 # color_list (OpenCV - BGR)
 COLOR_RED = (0, 0, 255)

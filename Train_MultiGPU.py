@@ -31,44 +31,32 @@ log_print('[i] Train : {}'.format(len(train_data_list)))
 log_print('[i] Valid : {}'.format(len(valid_data_list)))
 
 # 2. build
+utils = YOLOv3_Utils()
+
 input_var = tf.placeholder(tf.float32)
+input_size_var = tf.placeholder(tf.int32)
 is_training = tf.placeholder(tf.bool)
 
 input_vars = tf.split(input_var, NUM_GPU)
+gt_tensors_var = tf.placeholder(tf.float32, [None, None, 5 + CLASSES])
 
-pred_bboxes_ops = []
-pred_classes_ops = []
-
+pred_tensors_ops = []
 for gpu_id in range(NUM_GPU):
     reuse = gpu_id != 0
     
     with tf.device(tf.DeviceSpec(device_type = "GPU", device_index = gpu_id)):
         with tf.variable_scope(tf.get_variable_scope(), reuse = reuse):
             print(input_vars[gpu_id], is_training, reuse)
-            
-            retina_dic, retina_sizes = RetinaNet(input_vars[gpu_id], is_training)
-            if not reuse:
-                retina_utils = RetinaNet_Utils()
-            
-            pred_bboxes_ops.append(retina_dic['pred_bboxes'])
-            pred_classes_ops.append(retina_dic['pred_classes'])
 
-pred_bboxes_op = tf.concat(pred_bboxes_ops, axis = 0)
-pred_classes_op = tf.concat(pred_classes_ops, axis = 0)
+            pred_tensors_op = YOLOv3(input_vars[gpu_id], input_size_var, is_training, utils.anchors, reuse )
+            pred_tensors_ops.append(pred_tensors_op)
 
-retina_utils.generate_anchors(retina_sizes)
-pred_bboxes_op = Decode_Layer(pred_bboxes_op, retina_utils.anchors)
+pred_tensors_op = tf.concat(pred_tensors_ops, axis = 0)
 
-_, retina_size, _ = pred_bboxes_op.shape.as_list()
-gt_bboxes_var = tf.placeholder(tf.float32, [BATCH_SIZE, retina_size, 4])
-gt_classes_var = tf.placeholder(tf.float32, [BATCH_SIZE, retina_size, CLASSES])
+log_print('[i] pred_bboxes_op : {}'.format(pred_tensors_op))
+log_print('[i] gt_bboxes_var : {}'.format(gt_tensors_var))
 
-log_print('[i] pred_bboxes_op : {}'.format(pred_bboxes_op))
-log_print('[i] pred_classes_op : {}'.format(pred_classes_op))
-log_print('[i] gt_bboxes_var : {}'.format(gt_bboxes_var))
-log_print('[i] gt_classes_var : {}'.format(gt_classes_var))
-
-loss_op, focal_loss_op, giou_loss_op = RetinaNet_Loss(pred_bboxes_op, pred_classes_op, gt_bboxes_var, gt_classes_var)
+loss_op, giou_loss_op, conf_loss_op, class_loss_op = YOLOv3_Loss(pred_tensors_op, gt_tensors_var, tf.cast(input_size_var, tf.float32))
 
 vars = tf.trainable_variables()
 l2_reg_loss_op = tf.add_n([tf.nn.l2_loss(var) for var in vars]) * WEIGHT_DECAY
@@ -81,8 +69,9 @@ with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS)):
 
 train_summary_dic = {
     'Loss/Total_Loss' : loss_op,
-    'Loss/Focal_Loss' : focal_loss_op,
     'Loss/GIoU_Loss' : giou_loss_op,
+    'Loss/Confidence_Loss' : conf_loss_op,
+    'Loss/Classification_Loss' : class_loss_op,
     'Loss/L2_Regularization_Loss' : l2_reg_loss_op,
     'Learning_rate' : learning_rate_var,
 }
@@ -93,7 +82,7 @@ for name in train_summary_dic.keys():
     train_summary_list.append(tf.summary.scalar(name, value))
 train_summary_op = tf.summary.merge(train_summary_list)
 
-log_image_var = tf.placeholder(tf.float32, [None, IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNEL])
+log_image_var = tf.placeholder(tf.float32, [None, TEST_INPUT_SIZE, TEST_INPUT_SIZE, 3])
 log_image_op = tf.summary.image('Image/Train', log_image_var[..., ::-1], BATCH_SIZE)
 
 # 3. train
@@ -111,7 +100,7 @@ pretrained_saver.restore(sess, './resnet_v1_model/resnet_v1_50.ckpt')
 # '''
 
 saver = tf.train.Saver(max_to_keep = 10)
-# saver.restore(sess, './model/RetinaNet_{}.ckpt'.format(30000))
+# saver.restore(sess, './model/YOLOv3_{}.ckpt'.format(30000))
 
 learning_rate = INIT_LEARNING_RATE
 
@@ -119,8 +108,9 @@ log_print('[i] max_iteration : {}'.format(MAX_ITERATION))
 log_print('[i] decay_iteration : {}'.format(DECAY_ITERATIONS))
 
 loss_list = []
-focal_loss_list = []
 giou_loss_list = []
+conf_loss_list = []
+class_loss_list = []
 l2_reg_loss_list = []
 train_time = time.time()
 
@@ -128,7 +118,7 @@ train_writer = tf.summary.FileWriter('./logs/train')
 
 train_threads = []
 for i in range(NUM_THREADS):
-    train_thread = Teacher('./dataset/train_detection.npy', retina_sizes, debug = False)
+    train_thread = Teacher('./dataset/train_detection.npy', debug = False)
     train_thread.start()
     train_threads.append(train_thread)
 
@@ -145,11 +135,11 @@ for iter in range(1, MAX_ITERATION + 1):
         for train_thread in train_threads:
             if train_thread.ready:
                 find = True
-                batch_image_data, batch_encode_bboxes, batch_encode_classes = train_thread.get_batch_data()        
+                batch_image_data, batch_label_data, input_size = train_thread.get_batch_data()        
                 break
                 
-    _feed_dict = {input_var : batch_image_data, gt_bboxes_var : batch_encode_bboxes, gt_classes_var : batch_encode_classes, is_training : True, learning_rate_var : learning_rate}
-    log = sess.run([train_op, loss_op, focal_loss_op, giou_loss_op, l2_reg_loss_op, train_summary_op], feed_dict = _feed_dict)
+    _feed_dict = {input_var : batch_image_data, gt_tensors_var : batch_label_data, input_size_var : input_size, is_training : True, learning_rate_var : learning_rate}
+    log = sess.run([train_op, loss_op, giou_loss_op, conf_loss_op, class_loss_op, l2_reg_loss_op, train_summary_op], feed_dict = _feed_dict)
     # print(log[1:-1])
     
     if np.isnan(log[1]):
@@ -157,72 +147,75 @@ for iter in range(1, MAX_ITERATION + 1):
         input()
 
     loss_list.append(log[1])
-    focal_loss_list.append(log[2])
-    giou_loss_list.append(log[3])
-    l2_reg_loss_list.append(log[4])
-    train_writer.add_summary(log[5], iter)
+    giou_loss_list.append(log[2])
+    conf_loss_list.append(log[3])
+    class_loss_list.append(log[4])
+    l2_reg_loss_list.append(log[5])
+    train_writer.add_summary(log[6], iter)
     
     if iter % LOG_ITERATION == 0:
         loss = np.mean(loss_list)
-        focal_loss = np.mean(focal_loss_list)
         giou_loss = np.mean(giou_loss_list)
+        conf_loss = np.mean(conf_loss_list)
+        class_loss = np.mean(class_loss_list)
         l2_reg_loss = np.mean(l2_reg_loss_list)
         train_time = int(time.time() - train_time)
         
-        log_print('[i] iter : {}, loss : {:.4f}, focal_loss : {:.4f}, giou_loss : {:.4f}, l2_reg_loss : {:.4f}, train_time : {}sec'.format(iter, loss, focal_loss, giou_loss, l2_reg_loss, train_time))
+        log_print('[i] iter : {}, loss : {:.4f}, giou_loss : {:.4f}, conf_loss : {:.4f}, class_loss : {:.4f}, l2_reg_loss : {:.4f}, train_time : {}sec'.format(iter, loss, giou_loss, conf_loss, class_loss, l2_reg_loss, train_time))
 
         loss_list = []
-        focal_loss_list = []
         giou_loss_list = []
+        conf_loss_list = []
+        class_loss_list = []
         l2_reg_loss_list = []
         train_time = time.time()
 
-    if iter % SAMPLE_ITERATION == 0:
-        total_gt_bboxes = []
-        batch_image_data = np.zeros((BATCH_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNEL), dtype = np.float32)
+    # if iter % SAMPLE_ITERATION == 0:
+    #     total_gt_bboxes = []
+    #     batch_image_data = np.zeros((BATCH_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNEL), dtype = np.float32)
 
-        for i, data in enumerate(sample_data_list):
-            image_name, gt_bboxes, gt_classes = data        
-            image_path = TRAIN_DIR + image_name
+    #     for i, data in enumerate(sample_data_list):
+    #         image_name, gt_bboxes, gt_classes = data        
+    #         image_path = TRAIN_DIR + image_name
 
-            gt_bboxes = np.asarray(gt_bboxes, dtype = np.float32)
-            gt_classes = np.asarray([CLASS_DIC[c] for c in gt_classes], dtype = np.int32)
+    #         gt_bboxes = np.asarray(gt_bboxes, dtype = np.float32)
+    #         gt_classes = np.asarray([CLASS_DIC[c] for c in gt_classes], dtype = np.int32)
 
-            image = cv2.imread(image_path)
-            image_h, image_w, image_c = image.shape
+    #         image = cv2.imread(image_path)
+    #         image_h, image_w, image_c = image.shape
 
-            tf_image = cv2.resize(image, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation = cv2.INTER_CUBIC)
+    #         tf_image = cv2.resize(image, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation = cv2.INTER_CUBIC)
 
-            gt_bboxes /= [image_w, image_h, image_w, image_h]
-            gt_bboxes *= [IMAGE_WIDTH, IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_HEIGHT]
+    #         gt_bboxes /= [image_w, image_h, image_w, image_h]
+    #         gt_bboxes *= [IMAGE_WIDTH, IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_HEIGHT]
 
-            batch_image_data[i] = tf_image.copy()
-            total_gt_bboxes.append(gt_bboxes)
+    #         batch_image_data[i] = tf_image.copy()
+    #         total_gt_bboxes.append(gt_bboxes)
 
-        total_pred_bboxes, total_pred_classes = sess.run([pred_bboxes_op, pred_classes_op], feed_dict = {input_var : batch_image_data, is_training : False})
+    #     total_pred_bboxes, total_pred_classes = sess.run([pred_bboxes_op, pred_classes_op], feed_dict = {input_var : batch_image_data, is_training : False})
         
-        sample_images = []
-        for i in range(BATCH_SIZE):
-            image = batch_image_data[i]
-            pred_bboxes, pred_classes = retina_utils.Decode(total_pred_bboxes[i], total_pred_classes[i], [IMAGE_WIDTH, IMAGE_HEIGHT], detect_threshold = 0.05)
+    #     sample_images = []
+    #     for i in range(BATCH_SIZE):
+    #         image = batch_image_data[i]
+    #         pred_bboxes, pred_classes = retina_utils.Decode(total_pred_bboxes[i], total_pred_classes[i], [IMAGE_WIDTH, IMAGE_HEIGHT], detect_threshold = 0.05)
             
-            for bbox, class_index in zip(pred_bboxes, pred_classes):
-                xmin, ymin, xmax, ymax = bbox[:4].astype(np.int32)
-                conf = bbox[4]
-                class_name = CLASS_NAMES[class_index]
+    #         for bbox, class_index in zip(pred_bboxes, pred_classes):
+    #             xmin, ymin, xmax, ymax = bbox[:4].astype(np.int32)
+    #             conf = bbox[4]
+    #             class_name = CLASS_NAMES[class_index]
                 
-                string = "{} : {:.2f}%".format(class_name, conf * 100)
-                cv2.putText(image, string, (xmin, ymin - 10), 1, 1, (0, 255, 0))
-                cv2.rectangle(image, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
+    #             string = "{} : {:.2f}%".format(class_name, conf * 100)
+    #             cv2.putText(image, string, (xmin, ymin - 10), 1, 1, (0, 255, 0))
+    #             cv2.rectangle(image, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
 
-            for gt_bbox in total_gt_bboxes[i]:
-                xmin, ymin, xmax, ymax = gt_bbox.astype(np.int32)
-                cv2.rectangle(image, (xmin, ymin), (xmax, ymax), (0, 0, 255), 2)
+    #         for gt_bbox in total_gt_bboxes[i]:
+    #             xmin, ymin, xmax, ymax = gt_bbox.astype(np.int32)
+    #             cv2.rectangle(image, (xmin, ymin), (xmax, ymax), (0, 0, 255), 2)
 
-            sample_images.append(image.copy())
+    #         sample_images.append(image.copy())
             
-        image_summary = sess.run(log_image_op, feed_dict = {log_image_var : sample_images})
-        train_writer.add_summary(image_summary, iter)
+    #     image_summary = sess.run(log_image_op, feed_dict = {log_image_var : sample_images})
+    #     train_writer.add_summary(image_summary, iter)
 
     if iter % SAVE_ITERATION == 0:
         saver.save(sess, './model/RetinaNet_{}.ckpt'.format(iter))
